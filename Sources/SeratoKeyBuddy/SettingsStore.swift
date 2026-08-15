@@ -15,6 +15,14 @@ final class SettingsStore: ObservableObject {
     /// entries (Beatport, Spotify, ...) cannot be dragged onto a deck.
     @AppStorage("localFilesOnly") var localFilesOnly: Bool = true
 
+    /// Which tracks to use for compatible suggestions.
+    /// "library" = entire library, "currentCrate" = whatever crate is open in Serato,
+    /// "specificCrate" = the crate chosen in `selectedCrateId`.
+    @AppStorage("trackSource") var trackSource: String = "library"
+
+    /// Container id of the crate to use when `trackSource == "specificCrate"`.
+    @AppStorage("selectedCrateId") var selectedCrateId: Int = 0
+
     var colorScheme: ColorScheme? {
         switch theme {
         case "dark": return .dark

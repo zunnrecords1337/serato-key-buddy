@@ -11,6 +11,7 @@ Built for DJs: no buttons to press mid-set, drag straight onto a deck.
 - **Camelot grouping** — suggestions split into `Perfect`, `Relative`, `+1`, `−1` and `Energy Boost (+2)`, each filterable with one click.
 - **Drag to deck** — drag any suggestion straight onto a Serato deck.
 - **Local files only** — streaming entries (Beatport, Spotify, Tidal) and files missing from disk are hidden by default, because you can't load them onto a deck.
+- **Crate-aware** — suggestions can come from your entire library, the crate currently open in Serato, or a specific crate you pick. Switch crates in Serato and the app follows.
 - **Always on top** — floating window, visible across all Spaces, draggable by its background.
 - **Themes** — System / Dark / Light, and keys shown as Camelot (`8A`) or standard (`Am`).
 

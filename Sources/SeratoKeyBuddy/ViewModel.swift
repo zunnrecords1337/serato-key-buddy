@@ -27,6 +27,21 @@ final class SeratoBuddyViewModel: ObservableObject {
     @Published var lastUpdated: Date?
     @Published var statusMessage: String = "Waiting for Serato..."
 
+    /// Crates available for selection in settings.
+    @Published var allCrates: [SeratoSQLite.Crate] = []
+    /// The crate currently open in Serato (best-effort detection).
+    @Published var detectedCrate: SeratoSQLite.Crate?
+    /// Human-readable label for the current track source.
+    var sourceLabel: String {
+        switch SettingsStore.shared.trackSource {
+        case "currentCrate": return detectedCrate.map { "Crate: \($0.name)" } ?? "No crate detected"
+        case "specificCrate":
+            let id = SettingsStore.shared.selectedCrateId
+            return allCrates.first { $0.id == id }.map { "Crate: \($0.name)" } ?? "No crate selected"
+        default: return "Entire library"
+        }
+    }
+
     var filteredSections: [CompatibleSection] {
         guard let selected = selectedCategory else { return compatibleSections }
         return compatibleSections.filter { $0.category == selected }
@@ -37,6 +52,7 @@ final class SeratoBuddyViewModel: ObservableObject {
     private let sqlite = SeratoSQLite()
     private var library: [SeratoTrack] = []
     private var lastObservedActiveDeck: Int?
+    private var lastDetectedCrateId: Int?
 
     var currentTrack: SeratoTrack? {
         deckTracks[selectedDeck]
@@ -50,6 +66,7 @@ final class SeratoBuddyViewModel: ObservableObject {
     }
 
     func startMonitoring() {
+        loadCrates()
         loadLibrary()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -78,7 +95,6 @@ final class SeratoBuddyViewModel: ObservableObject {
             deckTracks = newTracks
 
             // Determine the active/last-active deck for auto-follow and UI indication.
-            // Prefer the active deck that started most recently, then the latest played deck.
             let computedActiveDeck: Int?
             if let active = entries.filter({ $0.isActive }).max(by: { $0.startTime < $1.startTime }) {
                 computedActiveDeck = active.deck
@@ -92,6 +108,19 @@ final class SeratoBuddyViewModel: ObservableObject {
             if autoFollow, let activeDeck = computedActiveDeck, activeDeck != lastObservedActiveDeck {
                 selectedDeck = activeDeck
                 lastObservedActiveDeck = activeDeck
+            }
+
+            // Detect current crate (for "currentCrate" mode and UI display).
+            if let crate = try? sqlite.currentCrate() {
+                detectedCrate = crate
+                // Auto-reload library if the detected crate changed while in currentCrate mode.
+                if SettingsStore.shared.trackSource == "currentCrate",
+                   crate.id != lastDetectedCrateId {
+                    lastDetectedCrateId = crate.id
+                    loadLibrary()
+                }
+            } else {
+                detectedCrate = nil
             }
 
             lastUpdated = Date()
@@ -138,18 +167,47 @@ final class SeratoBuddyViewModel: ObservableObject {
         statusMessage = "Deck \(selectedDeck): \(track.displayTitle)"
     }
 
-    /// Reload the library, e.g. after the "local files only" setting changed.
+    /// Reload the library, e.g. after a setting changed.
     func reloadLibrary() {
         library = []
         loadLibrary()
         updateCompatibleTracks()
     }
 
+    private func loadCrates() {
+        allCrates = (try? sqlite.allCrates()) ?? []
+    }
+
     private func loadLibrary() {
         let localOnly = SettingsStore.shared.localFilesOnly
+        let source = SettingsStore.shared.trackSource
+
         do {
-            library = try sqlite.readLibrary(localFilesOnly: localOnly)
-            statusMessage = "Loaded \(library.count) tracks from SQLite"
+            switch source {
+            case "currentCrate":
+                if let crate = try sqlite.currentCrate() {
+                    library = try sqlite.readCrate(containerId: crate.id, localFilesOnly: localOnly)
+                    lastDetectedCrateId = crate.id
+                    statusMessage = "Loaded \(library.count) tracks from crate \"\(crate.name)\""
+                } else {
+                    // No crate detected — fall back to full library so the app isn't empty.
+                    library = try sqlite.readLibrary(localFilesOnly: localOnly)
+                    statusMessage = "No crate open — showing full library"
+                }
+            case "specificCrate":
+                let crateId = SettingsStore.shared.selectedCrateId
+                if crateId > 0 {
+                    library = try sqlite.readCrate(containerId: crateId, localFilesOnly: localOnly)
+                    let name = allCrates.first { $0.id == crateId }?.name ?? "crate"
+                    statusMessage = "Loaded \(library.count) tracks from crate \"\(name)\""
+                } else {
+                    library = try sqlite.readLibrary(localFilesOnly: localOnly)
+                    statusMessage = "No crate selected — showing full library"
+                }
+            default:
+                library = try sqlite.readLibrary(localFilesOnly: localOnly)
+                statusMessage = "Loaded \(library.count) tracks from library"
+            }
         } catch {
             library = parser.parseDatabase()
             statusMessage = "Falling back to database V2 (\(library.count) tracks)"

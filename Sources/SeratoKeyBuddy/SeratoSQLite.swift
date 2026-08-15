@@ -216,6 +216,168 @@ final class SeratoSQLite {
         Int(sqlite3_column_int64(statement, index))
     }
 
+    // MARK: - Crates
+
+    struct Crate: Identifiable, Hashable {
+        let id: Int          // container.id
+        let name: String
+        let trackCount: Int
+    }
+
+    /// List all crates (top-level containers of type 1) with their track counts.
+    func allCrates() throws -> [Crate] {
+        let query = """
+            SELECT c.id, c.name, COUNT(ca.id) AS track_count
+            FROM container c
+            LEFT JOIN location_container lc ON lc.container_id = c.id
+            LEFT JOIN container_asset ca ON ca.location_container_id = lc.id
+            WHERE c.type = 1 AND c.parent_id IS NULL
+            GROUP BY c.id
+            ORDER BY c.name COLLATE NOCASE
+        """
+        return try withConnection { db in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK, let statement = stmt else {
+                throw SeratoSQLiteError.queryFailed(String(cString: sqlite3_errmsg(db) ?? ("Prepare failed" as NSString).utf8String!))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var crates: [Crate] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let id = int(statement, index: 0)
+                let name = string(statement, index: 1) ?? "Unknown"
+                let count = int(statement, index: 2)
+                crates.append(Crate(id: id, name: name, trackCount: count))
+            }
+            return crates
+        }
+    }
+
+    /// Best-effort detection of the crate currently displayed in Serato's library pane.
+    /// Serato keeps crate view slots in `assetlist_context` (source_type = 5); the one
+    /// whose backing `anonymous_table_*` has rows is the active crate.
+    func currentCrate() throws -> Crate? {
+        // Find active crate view slots.
+        let contextQuery = """
+            SELECT id, source_table FROM assetlist_context
+            WHERE source_type = 5 AND is_active = 1
+        """
+        let contexts: [(id: Int, table: String)] = try withConnection { db in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, contextQuery, -1, &stmt, nil) == SQLITE_OK, let statement = stmt else {
+                throw SeratoSQLiteError.queryFailed(String(cString: sqlite3_errmsg(db) ?? ("Prepare failed" as NSString).utf8String!))
+            }
+            defer { sqlite3_finalize(statement) }
+            var result: [(Int, String)] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let id = int(statement, index: 0)
+                let table = string(statement, index: 1) ?? ""
+                result.append((id, table))
+            }
+            return result
+        }
+
+        // Check each anonymous table for data; the first non-empty one is the current crate.
+        for (_, table) in contexts {
+            let count = try scalarQuery("SELECT COUNT(*) FROM \(table)")
+            if count > 0 {
+                // Resolve the crate name from the container_asset → location_container → container chain.
+                let nameQuery = """
+                    SELECT c.id, c.name, COUNT(*) AS cnt
+                    FROM \(table) t
+                    JOIN container_asset ca ON t.container_asset_id = ca.id
+                    JOIN location_container lc ON ca.location_container_id = lc.id
+                    JOIN container c ON lc.container_id = c.id
+                    GROUP BY c.id
+                    ORDER BY cnt DESC
+                    LIMIT 1
+                """
+                return try withConnection { db in
+                    var stmt: OpaquePointer?
+                    guard sqlite3_prepare_v2(db, nameQuery, -1, &stmt, nil) == SQLITE_OK, let statement = stmt else {
+                        return nil
+                    }
+                    defer { sqlite3_finalize(statement) }
+                    if sqlite3_step(statement) == SQLITE_ROW {
+                        let id = int(statement, index: 0)
+                        let name = string(statement, index: 1) ?? "Unknown"
+                        let count = int(statement, index: 2)
+                        return Crate(id: id, name: name, trackCount: count)
+                    }
+                    return nil
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Read all tracks belonging to a specific crate (by container id).
+    func readCrate(containerId: Int, localFilesOnly: Bool = true) throws -> [SeratoTrack] {
+        let basePaths = try resolveBasePaths()
+        let query = """
+            SELECT a.portable_id, a.file_name, a.artist, a.name, a.bpm, a.key, a.length_ms, a.location_id
+            FROM asset a
+            JOIN container_asset ca ON ca.asset_id = a.id
+            JOIN location_container lc ON ca.location_container_id = lc.id
+            WHERE lc.container_id = ? AND a.is_missing = 0
+            ORDER BY ca.list_order
+        """
+        return try withConnection { db in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK, let statement = stmt else {
+                throw SeratoSQLiteError.queryFailed(String(cString: sqlite3_errmsg(db) ?? ("Prepare failed" as NSString).utf8String!))
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int64(statement, 1, Int64(containerId))
+
+            let fileManager = FileManager.default
+            var tracks: [SeratoTrack] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let portableId = string(statement, index: 0)
+                let fileName = string(statement, index: 1)
+                let artist = string(statement, index: 2)
+                let name = string(statement, index: 3)
+                let bpm = double(statement, index: 4)
+                let key = string(statement, index: 5)
+                let lengthMs = int(statement, index: 6)
+                let locationId = int(statement, index: 7)
+                let length = lengthMs > 0 ? formattedLength(ms: lengthMs) : nil
+
+                let rawId = portableId ?? fileName ?? ""
+                let streamingSource = Self.streamingSource(from: rawId)
+                if localFilesOnly && streamingSource != nil { continue }
+
+                let fullPath = resolveFullPath(portableId: rawId, locationId: locationId, basePaths: basePaths)
+                if localFilesOnly, streamingSource == nil, !fileManager.fileExists(atPath: fullPath) { continue }
+
+                tracks.append(SeratoTrack(
+                    filePath: fullPath,
+                    title: name ?? fileName ?? "",
+                    artist: artist,
+                    bpm: bpm,
+                    key: key,
+                    length: length,
+                    streamingSource: streamingSource
+                ))
+            }
+            return tracks
+        }
+    }
+
+    private func scalarQuery(_ sql: String) throws -> Int {
+        try withConnection { db in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let statement = stmt else {
+                throw SeratoSQLiteError.queryFailed(String(cString: sqlite3_errmsg(db) ?? ("Prepare failed" as NSString).utf8String!))
+            }
+            defer { sqlite3_finalize(statement) }
+            if sqlite3_step(statement) == SQLITE_ROW {
+                return Int(sqlite3_column_int64(statement, 0))
+            }
+            return 0
+        }
+    }
+
     private func formattedLength(ms: Int) -> String {
         let totalSeconds = ms / 1000
         let minutes = totalSeconds / 60

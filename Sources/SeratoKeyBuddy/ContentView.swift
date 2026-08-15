@@ -43,10 +43,19 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Serato Key Buddy")
                     .font(.headline)
-                if let active = viewModel.activeDeck {
-                    Text("Serato active: Deck \(active)")
+                HStack(spacing: 6) {
+                    if let active = viewModel.activeDeck {
+                        Text("Deck \(active)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("·")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                    Text(viewModel.sourceLabel)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
             Spacer()
@@ -296,6 +305,7 @@ struct KeyBadge: View {
 
 struct SettingsView: View {
     @StateObject private var settings = SettingsStore.shared
+    @StateObject private var viewModel = SeratoBuddyViewModel()
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -306,6 +316,44 @@ struct SettingsView: View {
                 Spacer()
                 Button("Done") { dismiss() }
                     .buttonStyle(.borderless)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Track source")
+                    .font(.subheadline.weight(.semibold))
+                Picker("Track source", selection: $settings.trackSource) {
+                    Text("Entire library").tag("library")
+                    Text("Current crate").tag("currentCrate")
+                    Text("Specific crate").tag("specificCrate")
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: settings.trackSource) { _, _ in
+                    viewModel.reloadLibrary()
+                }
+
+                if settings.trackSource == "specificCrate" {
+                    Picker("Crate", selection: $settings.selectedCrateId) {
+                        Text("Select a crate…").tag(0)
+                        ForEach(viewModel.allCrates) { crate in
+                            Text("\(crate.name) (\(crate.trackCount))").tag(crate.id)
+                        }
+                    }
+                    .onChange(of: settings.selectedCrateId) { _, _ in
+                        viewModel.reloadLibrary()
+                    }
+                }
+
+                if settings.trackSource == "currentCrate" {
+                    if let crate = viewModel.detectedCrate {
+                        Text("Detected: \(crate.name) (\(crate.trackCount) tracks)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("No crate currently open in Serato — showing full library as fallback.")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -340,6 +388,8 @@ struct SettingsView: View {
             Spacer()
         }
         .padding()
-        .frame(minWidth: 280, minHeight: 160)
+        .frame(minWidth: 320, minHeight: 240)
+        .onAppear { viewModel.startMonitoring() }
+        .onDisappear { viewModel.stopMonitoring() }
     }
 }
